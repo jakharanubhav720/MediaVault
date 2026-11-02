@@ -1,0 +1,218 @@
+import json
+import os
+import uuid
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from database import get_connection, init_db
+from ai_search import describe_image, get_client, make_embedding, search_media
+
+load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = Path(os.getenv("MEDIAVAULT_UPLOAD_DIR", BASE_DIR / "uploads"))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_FILE_BYTES = int(os.getenv("MAX_FILE_MB", "50")) * 1024 * 1024
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".avi"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+app = FastAPI(title="MediaVault API", version="1.1.0", description="FastAPI + SQLite backend with AI media search")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",") if x.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["*"],
+)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+def public_item(row):
+    item = dict(row)
+    item.pop("embedding", None)
+    item["url"] = f"/uploads/{item['stored_filename']}"
+    return item
+
+
+def read_media_rows():
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM media ORDER BY created_at DESC, id DESC").fetchall()
+
+
+def save_upload(file_path: Path, original_name: str, content_type: str, data: bytes, media_type: str):
+    description = original_name
+    embedding = None
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        try:
+            if media_type == "Image":
+                description = describe_image(file_path, content_type) or original_name
+            # Video embeddings use the filename until frame extraction is added.
+            vector = make_embedding(f"{original_name}. {description}")
+            embedding = json.dumps(vector) if vector else None
+        except Exception:
+            # Keep uploads available if the optional AI provider is unavailable.
+            description, embedding = original_name, None
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """INSERT INTO media (filename, stored_filename, media_type, mime_type, size_bytes, description, embedding)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (original_name, file_path.name, media_type, content_type, len(data), description, embedding),
+        )
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return row
+
+
+@app.get("/")
+def root():
+    return {"project": "MediaVault", "status": "running", "docs": "/docs"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "ai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip())}
+
+
+@app.post("/media", status_code=201)
+async def upload_media(file: UploadFile = File(...)):
+    original_name = Path(file.filename or "upload").name
+    extension = Path(original_name).suffix.lower()
+    if extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, "Unsupported file type.")
+    content_type = file.content_type or "application/octet-stream"
+    if extension in IMAGE_EXTENSIONS and not content_type.startswith("image/"):
+        raise HTTPException(400, "File extension and content type do not match.")
+    if extension not in IMAGE_EXTENSIONS and not content_type.startswith("video/"):
+        raise HTTPException(400, "File extension and content type do not match.")
+    data = await file.read(MAX_FILE_BYTES + 1)
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty.")
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(413, f"File exceeds the {MAX_FILE_BYTES // (1024 * 1024)} MB limit.")
+    stored_name = f"{uuid.uuid4().hex}{extension}"
+    path = UPLOAD_DIR / stored_name
+    path.write_bytes(data)
+    media_type = "Image" if extension in IMAGE_EXTENSIONS else "Video"
+    try:
+        row = save_upload(path, original_name, content_type, data, media_type)
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(500, f"Could not save media metadata: {type(exc).__name__}")
+    return public_item(row)
+
+
+@app.get("/media")
+def list_media(
+    q: Optional[str] = Query(default=None, max_length=200),
+    media_type: str = Query(default="All", pattern="^(All|Image|Video)$"),
+):
+    with get_connection() as conn:
+        if media_type == "All":
+            rows = conn.execute("SELECT * FROM media ORDER BY created_at DESC, id DESC").fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM media WHERE media_type = ? ORDER BY created_at DESC, id DESC", (media_type,)).fetchall()
+    items = [public_item(row) for row in rows]
+    if q:
+        term = q.casefold()
+        items = [item for item in items if term in item["filename"].casefold() or term in item["description"].casefold()]
+    return {"count": len(items), "items": items}
+
+
+@app.post("/media/reindex")
+def reindex_media():
+    """Generate captions/embeddings for existing images after configuring the AI key."""
+    if get_client() is None:
+        raise HTTPException(503, "Set OPENAI_API_KEY in the backend .env file before indexing media.")
+    rows = read_media_rows()
+    updated = 0
+    failures = []
+    for row in rows:
+        path = UPLOAD_DIR / row["stored_filename"]
+        if not path.exists():
+            failures.append(row["id"])
+            continue
+        try:
+            description = row["description"] or row["filename"]
+            if row["media_type"] == "Image":
+                description = describe_image(path, row["mime_type"]) or description
+            vector = make_embedding(f"{row['filename']}. {description}")
+            with get_connection() as conn:
+                conn.execute("UPDATE media SET description = ?, embedding = ? WHERE id = ?", (description, json.dumps(vector) if vector else None, row["id"]))
+            updated += 1
+        except Exception:
+            failures.append(row["id"])
+    return {"updated": updated, "failed_ids": failures}
+
+
+@app.get("/media/{media_id}")
+def get_media(media_id: int):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Media not found.")
+    return public_item(row)
+
+
+@app.delete("/media/{media_id}")
+def delete_media(media_id: int):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Media not found.")
+        conn.execute("DELETE FROM media WHERE id = ?", (media_id,))
+    (UPLOAD_DIR / row["stored_filename"]).unlink(missing_ok=True)
+    return {"message": "Media deleted", "id": media_id}
+
+
+@app.get("/search/ai")
+def ai_search(q: str = Query(min_length=1, max_length=500)):
+    if get_client() is None:
+        raise HTTPException(503, "AI search needs OPENAI_API_KEY in the backend .env file. Filename search remains available in Media Library.")
+    rows = read_media_rows()
+    try:
+        results = search_media(q.strip(), rows)
+    except Exception as exc:
+        raise HTTPException(502, f"AI search provider error: {type(exc).__name__}")
+    return {"query": q, "count": len(results), "items": [public_item(row) for row in results]}
+
+
+@app.post("/search/visual")
+async def visual_search(file: UploadFile = File(...)):
+    """Caption a reference image and find stored media with similar embeddings."""
+    if get_client() is None:
+        raise HTTPException(503, "Visual search needs OPENAI_API_KEY in the backend .env file.")
+    original_name = Path(file.filename or "reference.png").name
+    extension = Path(original_name).suffix.lower()
+    if extension not in IMAGE_EXTENSIONS:
+        raise HTTPException(400, "Upload a PNG, JPG, JPEG, WEBP, or GIF reference image.")
+    content_type = file.content_type or "image/jpeg"
+    if not content_type.startswith("image/"):
+        raise HTTPException(400, "The reference file must be an image.")
+    data = await file.read(MAX_FILE_BYTES + 1)
+    if not data:
+        raise HTTPException(400, "The reference image is empty.")
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(413, "Reference image exceeds the configured file-size limit.")
+    temp_path = UPLOAD_DIR / f"query-{uuid.uuid4().hex}{extension}"
+    try:
+        temp_path.write_bytes(data)
+        query_description = describe_image(temp_path, content_type)
+        if not query_description:
+            raise HTTPException(502, "The AI model could not describe the reference image.")
+        rows = read_media_rows()
+        results = search_media(query_description, rows)
+        # The query image is temporary and is not added to the user's library.
+        return {"query_description": query_description, "count": len(results), "items": [public_item(row) for row in results]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"Visual search provider error: {type(exc).__name__}")
+    finally:
+        temp_path.unlink(missing_ok=True)
