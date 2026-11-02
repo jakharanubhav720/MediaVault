@@ -19,7 +19,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_FILE_BYTES = int(os.getenv("MAX_FILE_MB", "50")) * 1024 * 1024
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".avi"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-
+print("main.py imported OK", flush=True)
 app = FastAPI(title="MediaVault API", version="1.1.0", description="FastAPI + SQLite backend with AI media search")
 app.add_middleware(
     CORSMiddleware,
