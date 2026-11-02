@@ -1,12 +1,9 @@
-streamlit>=1.36
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 python-dotenv>=1.0
 requests>=2.32
-openai>=1.60
-pillow
+streamlit>=1.36
+sentence-transformers>=3.0
+Pillow>=10.0
 numpy
-sentence-transformers
-torch
-torchvision
