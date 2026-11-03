@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from database import get_connection, init_db
 
-AI_ENABLED = os.getenv("ENABLE_LOCAL_AI", "0") == "1"
+AI_ENABLED = bool(os.getenv("OPENAI_API_KEY"))
 
 
 def make_embedding(text):
