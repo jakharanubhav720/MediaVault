@@ -3,15 +3,19 @@ import math
 from pathlib import Path
 
 from PIL import Image
-from sentence_transformers import SentenceTransformer
 
 _model = None
 
 
 def get_model():
     global _model
+
     if _model is None:
+        # Import the heavy library only when AI search is actually requested.
+        from sentence_transformers import SentenceTransformer
+
         _model = SentenceTransformer("clip-ViT-B-32")
+
     return _model
 
 
@@ -28,6 +32,7 @@ def make_embedding(text: str):
         convert_to_numpy=True,
         normalize_embeddings=True
     )
+
     return vector.tolist()
 
 
@@ -35,12 +40,15 @@ def make_image_embedding(path: Path):
     try:
         with Image.open(path) as image:
             image = image.convert("RGB")
+
             vector = get_model().encode(
                 image,
                 convert_to_numpy=True,
                 normalize_embeddings=True
             )
+
         return vector.tolist()
+
     except Exception as error:
         print(f"Could not process image {path}: {error}")
         return None
@@ -79,4 +87,5 @@ def search_media(query: str, rows):
             ranked.append(item)
 
     ranked.sort(key=lambda item: item["similarity"], reverse=True)
+
     return ranked
