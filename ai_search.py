@@ -1,91 +1,78 @@
-import json
-import math
+import base64
+import mimetypes
+import os
 from pathlib import Path
 
-from PIL import Image
+from openai import OpenAI
 
-_model = None
+EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+MIN_SCORE = float(os.getenv("AI_MIN_SCORE", "0.25"))
 
-
-def get_model():
-    global _model
-
-    if _model is None:
-        # Import the heavy library only when AI search is actually requested.
-        from sentence_transformers import SentenceTransformer
-
-        _model = SentenceTransformer("clip-ViT-B-32")
-
-    return _model
+_client = None
 
 
-def describe_image(path: Path, mime_type: str) -> str:
-    return ""
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30)
+    return _client
 
 
-def make_embedding(text: str):
-    if not text or not text.strip():
+def make_embedding(text):
+    text = (text or "").strip()
+    if not text:
         return None
+    result = _get_client().embeddings.create(model=EMBED_MODEL, input=text[:4000])
+    return result.data[0].embedding
 
-    vector = get_model().encode(
-        text.strip(),
-        convert_to_numpy=True,
-        normalize_embeddings=True
+
+def describe_image(path):
+    path = Path(path)
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    b64 = base64.b64encode(path.read_bytes()).decode()
+    response = _get_client().chat.completions.create(
+        model=VISION_MODEL,
+        max_tokens=150,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image in 2-3 plain sentences: main objects, colors, setting and actions."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            ],
+        }],
     )
+    return (response.choices[0].message.content or "").strip()
 
-    return vector.tolist()
 
-
-def make_image_embedding(path: Path):
-    try:
-        with Image.open(path) as image:
-            image = image.convert("RGB")
-
-            vector = get_model().encode(
-                image,
-                convert_to_numpy=True,
-                normalize_embeddings=True
-            )
-
-        return vector.tolist()
-
-    except Exception as error:
-        print(f"Could not process image {path}: {error}")
-        return None
+def make_image_embedding(path):
+    return make_embedding(describe_image(path))
 
 
 def cosine_similarity(a, b):
     if not a or not b or len(a) != len(b):
         return 0.0
-
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if not norm_a or not norm_b:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
-
-def search_media(query: str, rows):
+def search_media(query, rows):
+    import json
     query_vector = make_embedding(query)
-
-    if query_vector is None:
+    if not query_vector:
         return []
-
-    ranked = []
-
+    scored = []
     for row in rows:
         try:
             vector = json.loads(row["embedding"]) if row["embedding"] else None
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             vector = None
-
         score = cosine_similarity(query_vector, vector)
-
-        if score > 0:
-            item = dict(row)
-            item["similarity"] = round(score, 4)
-            ranked.append(item)
-
-    ranked.sort(key=lambda item: item["similarity"], reverse=True)
-
-    return ranked
+        if score >= MIN_SCORE:
+            scored.append((score, row))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in scored[:20]]
