@@ -13,32 +13,6 @@ from database import get_connection, init_db
 
 load_dotenv()
 
-# AI features are on only when a Gemini API key is configured.
-AI_ENABLED = bool(os.getenv("GEMINI_API_KEY"))
-
-
-def make_embedding(text):
-    if not AI_ENABLED:
-        return None
-    from ai_search import make_embedding as _fn
-    return _fn(text)
-
-
-def make_image_embedding(path):
-    if not AI_ENABLED:
-        return None
-    from ai_search import make_image_embedding as _fn
-    return _fn(path)
-
-
-def search_media(query, rows):
-    if not AI_ENABLED:
-        term = query.casefold()
-        return [r for r in rows if term in r["filename"].casefold()]
-    from ai_search import search_media as _fn
-    return _fn(query, rows)
-
-
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = Path(os.getenv("MEDIAVAULT_UPLOAD_DIR", BASE_DIR / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,7 +21,14 @@ ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 print("main.py imported OK", flush=True)
 
-app = FastAPI(title="MediaVault API", version="1.1.0", description="FastAPI + SQLite backend with AI media search")
+
+def ai():
+    """Import the AI helpers lazily so the web server always starts quickly."""
+    import ai_search
+    return ai_search
+
+
+app = FastAPI(title="MediaVault API", version="1.2.0", description="FastAPI + SQLite backend with image similarity search")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",") if x.strip()],
@@ -66,7 +47,7 @@ def startup():
 
 def public_item(row):
     item = dict(row)
-    item.pop("embedding", None)
+    item.pop("embedding", None)  # similarity / match_percent are intentionally kept
     item["url"] = f"/uploads/{item['stored_filename']}"
     return item
 
@@ -81,19 +62,12 @@ def save_upload(file_path: Path, original_name: str, content_type: str, data: by
     embedding = None
 
     try:
-        vector = None
-        if AI_ENABLED:
-            if media_type == "Image":
-                from ai_search import describe_and_embed
-                ai_description, vector = describe_and_embed(file_path)
-                if ai_description:
-                    description = ai_description
-            else:
-                vector = make_embedding(original_name)
-
-        if vector:
-            embedding = json.dumps(vector)
+        ai_description, record = ai().build_record(file_path, media_type, original_name)
+        if ai_description:
+            description = ai_description
+        embedding = json.dumps(record)
     except Exception as exc:
+        # The file is still saved; it just will not appear in similarity results until re-indexed.
         print(f"Embedding generation failed: {exc!r}", flush=True)
 
     with get_connection() as conn:
@@ -126,30 +100,12 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ai_configured": AI_ENABLED, "ai_provider": "gemini" if AI_ENABLED else "none"}
-
-
-@app.get("/debug/ai")
-def debug_ai():
-    key = os.getenv("GEMINI_API_KEY", "")
-    info = {"ai_enabled": AI_ENABLED, "key_length": len(key)}
-    if not AI_ENABLED:
-        info["problem"] = "GEMINI_API_KEY is not set in Render's Environment tab."
-        return info
-    from ai_search import EMBED_MODEL, VISION_MODELS, _get_client, make_embedding as _embed
-    try:
-        info["embedding"] = f"ok (model {EMBED_MODEL}, {len(_embed('test'))} dims)"
-    except Exception as exc:
-        info["embedding"] = f"FAILED: {exc!r}"[:500]
-    models = {}
-    for name in VISION_MODELS:
-        try:
-            _get_client().models.generate_content(model=name, contents="Reply with OK")
-            models[name] = "ok"
-        except Exception as exc:
-            models[name] = f"FAILED: {exc!r}"[:400]
-    info["vision_models"] = models
-    return info
+    helper = ai()
+    return {
+        "status": "ok",
+        "image_model": helper.current_image_model(),
+        "text_search": "gemini" if helper.gemini_enabled() else "keywords",
+    }
 
 
 @app.post("/media", status_code=201)
@@ -199,6 +155,8 @@ def list_media(
 
 @app.post("/media/reindex")
 def reindex_media():
+    """Rebuild embeddings for every stored file with the current model."""
+    helper = ai()
     rows = read_media_rows()
     updated = 0
     failures = []
@@ -211,27 +169,19 @@ def reindex_media():
             continue
 
         try:
-            if row["media_type"] == "Image":
-                vector = make_image_embedding(path)
-            else:
-                vector = make_embedding(row["filename"])
-
+            description, record = helper.build_record(path, row["media_type"], row["filename"])
             with get_connection() as conn:
-                conn.execute(
-                    "UPDATE media SET embedding = ? WHERE id = ?",
-                    (json.dumps(vector) if vector else None, row["id"]),
-                )
-
-            if vector:
-                updated += 1
-            else:
-                failures.append(row["id"])
-
+                if description:
+                    conn.execute("UPDATE media SET embedding = ?, description = ? WHERE id = ?",
+                                 (json.dumps(record), description, row["id"]))
+                else:
+                    conn.execute("UPDATE media SET embedding = ? WHERE id = ?", (json.dumps(record), row["id"]))
+            updated += 1
         except Exception as error:
             print(f"Reindex failed for media {row['id']}: {error!r}", flush=True)
             failures.append(row["id"])
 
-    return {"updated": updated, "failed_ids": failures}
+    return {"updated": updated, "failed_ids": failures, "model": helper.current_image_model()}
 
 
 @app.get("/media/{media_id}")
@@ -259,7 +209,7 @@ def ai_search(q: str = Query(min_length=1, max_length=500)):
     rows = read_media_rows()
 
     try:
-        results = search_media(q.strip(), rows)
+        results = ai().search_media(q.strip(), rows)
     except Exception as exc:
         print(f"AI search error: {exc!r}", flush=True)
         raise HTTPException(502, f"AI search failed: {type(exc).__name__}")
@@ -296,49 +246,46 @@ async def visual_search(file: UploadFile = File(...)):
 
     try:
         temp_path.write_bytes(data)
-        query_vector = make_image_embedding(temp_path)
+        helper = ai()
 
-        if query_vector is None:
-            raise HTTPException(400, "Could not process the reference image.")
+        try:
+            query = helper.image_vector(temp_path)
+        except ValueError as exc:
+            raise HTTPException(400, f"Could not process the reference image: {exc}")
 
-        rows = read_media_rows()
         ranked = []
+        not_indexed = 0
 
-        for row in rows:
+        for row in read_media_rows():
             if row["media_type"] != "Image":
                 continue
 
-            try:
-                vector = json.loads(row["embedding"]) if row["embedding"] else None
-            except (TypeError, json.JSONDecodeError):
-                vector = None
+            entry = helper.load_record(row["embedding"]).get("img")
 
-            if not vector:
+            # Only compare vectors produced by the same model as the reference image.
+            if not entry or entry.get("model") != query["model"] or not entry.get("vec"):
+                not_indexed += 1
                 continue
 
-            from ai_search import cosine_similarity
-            score = cosine_similarity(query_vector, vector)
-
-            if score > 0:
-                item = dict(row)
-                item["similarity"] = round(score, 4)
-                ranked.append(item)
+            score = helper.cosine_similarity(query["vec"], entry["vec"])
+            item = dict(row)
+            item["similarity"] = round(score, 4)                         # raw cosine, 0..1
+            item["match_percent"] = round(max(0.0, score) * 100, 1)      # shown as "Match: 96.5%"
+            ranked.append(item)
 
         ranked.sort(key=lambda item: item["similarity"], reverse=True)
 
         return {
             "count": len(ranked),
+            "model": query["model"],
+            "not_indexed": not_indexed,
             "items": [public_item(item) for item in ranked],
         }
 
     except HTTPException:
         raise
-        except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            502,
-            f"Visual search failed: {type(exc).__name__}: {str(exc)}"
-        )
+    except Exception as exc:
+        print(f"Visual search error: {exc!r}", flush=True)
+        raise HTTPException(502, f"Visual search failed: {type(exc).__name__}")
     finally:
         temp_path.unlink(missing_ok=True)
