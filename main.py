@@ -81,10 +81,15 @@ def save_upload(file_path: Path, original_name: str, content_type: str, data: by
     embedding = None
 
     try:
-        if media_type == "Image":
-            vector = make_image_embedding(file_path)
-        else:
-            vector = make_embedding(original_name)
+        vector = None
+        if AI_ENABLED:
+            if media_type == "Image":
+                from ai_search import describe_and_embed
+                ai_description, vector = describe_and_embed(file_path)
+                if ai_description:
+                    description = ai_description
+            else:
+                vector = make_embedding(original_name)
 
         if vector:
             embedding = json.dumps(vector)
@@ -122,6 +127,29 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "ai_configured": AI_ENABLED, "ai_provider": "gemini" if AI_ENABLED else "none"}
+
+
+@app.get("/debug/ai")
+def debug_ai():
+    key = os.getenv("GEMINI_API_KEY", "")
+    info = {"ai_enabled": AI_ENABLED, "key_length": len(key)}
+    if not AI_ENABLED:
+        info["problem"] = "GEMINI_API_KEY is not set in Render's Environment tab."
+        return info
+    from ai_search import EMBED_MODEL, VISION_MODELS, _get_client, make_embedding as _embed
+    try:
+        info["embedding"] = f"ok (model {EMBED_MODEL}, {len(_embed('test'))} dims)"
+    except Exception as exc:
+        info["embedding"] = f"FAILED: {exc!r}"[:500]
+    models = {}
+    for name in VISION_MODELS:
+        try:
+            _get_client().models.generate_content(model=name, contents="Reply with OK")
+            models[name] = "ok"
+        except Exception as exc:
+            models[name] = f"FAILED: {exc!r}"[:400]
+    info["vision_models"] = models
+    return info
 
 
 @app.post("/media", status_code=201)
