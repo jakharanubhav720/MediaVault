@@ -36,6 +36,7 @@ app = FastAPI(title="MediaVault API", version="1.1.0", description="FastAPI + SQ
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",") if x.strip()],
+    allow_origin_regex=r"https://mediavault-frontend.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
