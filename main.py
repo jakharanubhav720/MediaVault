@@ -11,6 +11,9 @@ from fastapi.staticfiles import StaticFiles
 
 from database import get_connection, init_db
 
+load_dotenv()
+
+# AI features are on only when a Gemini API key is configured.
 AI_ENABLED = bool(os.getenv("GEMINI_API_KEY"))
 
 
@@ -34,7 +37,8 @@ def search_media(query, rows):
         return [r for r in rows if term in r["filename"].casefold()]
     from ai_search import search_media as _fn
     return _fn(query, rows)
-load_dotenv()
+
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = Path(os.getenv("MEDIAVAULT_UPLOAD_DIR", BASE_DIR / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,6 +46,7 @@ MAX_FILE_BYTES = int(os.getenv("MAX_FILE_MB", "50")) * 1024 * 1024
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".avi"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 print("main.py imported OK", flush=True)
+
 app = FastAPI(title="MediaVault API", version="1.1.0", description="FastAPI + SQLite backend with AI media search")
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +57,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
 
 @app.on_event("startup")
 def startup():
@@ -83,7 +89,7 @@ def save_upload(file_path: Path, original_name: str, content_type: str, data: by
         if vector:
             embedding = json.dumps(vector)
     except Exception as exc:
-        print(f"Embedding generation failed: {exc}")
+        print(f"Embedding generation failed: {exc!r}", flush=True)
 
     with get_connection() as conn:
         cursor = conn.execute(
@@ -106,6 +112,8 @@ def save_upload(file_path: Path, original_name: str, content_type: str, data: by
         ).fetchone()
 
     return row
+
+
 @app.get("/")
 def root():
     return {"project": "MediaVault", "status": "running", "docs": "/docs"}
@@ -113,7 +121,9 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ai_configured": True, "ai_provider": "local CLIP"}
+    return {"status": "ok", "ai_configured": AI_ENABLED, "ai_provider": "gemini" if AI_ENABLED else "none"}
+
+
 @app.post("/media", status_code=201)
 async def upload_media(file: UploadFile = File(...)):
     original_name = Path(file.filename or "upload").name
@@ -190,10 +200,11 @@ def reindex_media():
                 failures.append(row["id"])
 
         except Exception as error:
-            print(f"Reindex failed for media {row['id']}: {error}")
+            print(f"Reindex failed for media {row['id']}: {error!r}", flush=True)
             failures.append(row["id"])
 
     return {"updated": updated, "failed_ids": failures}
+
 
 @app.get("/media/{media_id}")
 def get_media(media_id: int):
@@ -222,6 +233,7 @@ def ai_search(q: str = Query(min_length=1, max_length=500)):
     try:
         results = search_media(q.strip(), rows)
     except Exception as exc:
+        print(f"AI search error: {exc!r}", flush=True)
         raise HTTPException(502, f"AI search failed: {type(exc).__name__}")
 
     return {
@@ -229,6 +241,7 @@ def ai_search(q: str = Query(min_length=1, max_length=500)):
         "count": len(results),
         "items": [public_item(row) for row in results],
     }
+
 
 @app.post("/search/visual")
 async def visual_search(file: UploadFile = File(...)):
@@ -290,7 +303,7 @@ async def visual_search(file: UploadFile = File(...)):
             "items": [public_item(item) for item in ranked],
         }
 
-               except HTTPException:
+    except HTTPException:
         raise
     except Exception as exc:
         print(f"Visual search error: {exc!r}", flush=True)
