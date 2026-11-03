@@ -333,8 +333,12 @@ async def visual_search(file: UploadFile = File(...)):
 
     except HTTPException:
         raise
-    except Exception as exc:
-        print(f"Visual search error: {exc!r}", flush=True)
-        raise HTTPException(502, f"Visual search failed: {type(exc).__name__}")
+        except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            502,
+            f"Visual search failed: {type(exc).__name__}: {str(exc)}"
+        )
     finally:
         temp_path.unlink(missing_ok=True)
