@@ -10,8 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from database import get_connection, init_db
-from ai_search import make_embedding, make_image_embedding, search_media
 
+def make_embedding(text):
+    from ai_search import make_embedding as _fn
+    return _fn(text)
+
+
+def make_image_embedding(path):
+    from ai_search import make_image_embedding as _fn
+    return _fn(path)
+
+
+def search_media(query, rows):
+    from ai_search import search_media as _fn
+    return _fn(query, rows)
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = Path(os.getenv("MEDIAVAULT_UPLOAD_DIR", BASE_DIR / "uploads"))
