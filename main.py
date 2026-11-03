@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from database import get_connection, init_db
 
-AI_ENABLED = bool(os.getenv("OPENAI_API_KEY"))
+AI_ENABLED = bool(os.getenv("GEMINI_API_KEY"))
 
 
 def make_embedding(text):
