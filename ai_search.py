@@ -1,13 +1,15 @@
-import base64
+import json
 import mimetypes
 import os
 from pathlib import Path
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
-EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
-VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
-MIN_SCORE = float(os.getenv("AI_MIN_SCORE", "0.25"))
+EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
+VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+EMBED_DIMS = 768
+MIN_SCORE = float(os.getenv("AI_MIN_SCORE", "0.5"))
 
 _client = None
 
@@ -15,7 +17,7 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30)
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     return _client
 
 
@@ -23,26 +25,25 @@ def make_embedding(text):
     text = (text or "").strip()
     if not text:
         return None
-    result = _get_client().embeddings.create(model=EMBED_MODEL, input=text[:4000])
-    return result.data[0].embedding
+    result = _get_client().models.embed_content(
+        model=EMBED_MODEL,
+        contents=text[:4000],
+        config=types.EmbedContentConfig(output_dimensionality=EMBED_DIMS),
+    )
+    return list(result.embeddings[0].values)
 
 
 def describe_image(path):
     path = Path(path)
     mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    b64 = base64.b64encode(path.read_bytes()).decode()
-    response = _get_client().chat.completions.create(
+    response = _get_client().models.generate_content(
         model=VISION_MODEL,
-        max_tokens=150,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Describe this image in 2-3 plain sentences: main objects, colors, setting and actions."},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            ],
-        }],
+        contents=[
+            types.Part.from_bytes(data=path.read_bytes(), mime_type=mime),
+            "Describe this image in 2-3 plain sentences: main objects, colors, setting and actions.",
+        ],
     )
-    return (response.choices[0].message.content or "").strip()
+    return (response.text or "").strip()
 
 
 def make_image_embedding(path):
@@ -61,7 +62,6 @@ def cosine_similarity(a, b):
 
 
 def search_media(query, rows):
-    import json
     query_vector = make_embedding(query)
     if not query_vector:
         return []
