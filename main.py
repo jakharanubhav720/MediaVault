@@ -290,7 +290,7 @@ async def visual_search(file: UploadFile = File(...)):
             "items": [public_item(item) for item in ranked],
         }
 
-           except HTTPException:
+               except HTTPException:
         raise
     except Exception as exc:
         print(f"Visual search error: {exc!r}", flush=True)
