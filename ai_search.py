@@ -1,41 +1,27 @@
-"""MediaVault AI helpers.
-
-Image matching is done locally (no external API), so it keeps working when a
-cloud AI service is unavailable. Stored images and reference images are always
-embedded by the SAME backend, and every stored vector is tagged with the model
-name so incompatible vectors are never compared.
-
-Backends (env IMAGE_EMBED_BACKEND):
-  visual (default) - lightweight colour + edge-structure descriptor (Pillow + numpy)
-  clip             - CLIP ViT-B/32 via ONNX (needs `fastembed`; ~350 MB of RAM, so it
-                     needs a paid Render instance)
-
-Optional: if GEMINI_API_KEY is set, a text description of each image is also
-generated and embedded, which powers natural-language search.
-"""
 import json
 import mimetypes
 import os
+import time
 from pathlib import Path
-
+ 
 import numpy as np
 from PIL import Image, ImageOps
-
+ 
 Image.MAX_IMAGE_PIXELS = 100_000_000  # refuse decompression bombs
-
+ 
 IMAGE_BACKEND = os.getenv("IMAGE_EMBED_BACKEND", "visual").strip().lower()
-
+ 
 # ---------------------------------------------------------------- image vectors
-
-
+ 
+ 
 def _normalize(block, center=True):
     block = np.asarray(block, dtype=np.float64).ravel()
     if center:
         block = block - block.mean()
     norm = np.linalg.norm(block)
     return block / norm if norm > 1e-12 else np.zeros_like(block)
-
-
+ 
+ 
 def _open_rgb(path):
     try:
         img = Image.open(path)
@@ -45,17 +31,17 @@ def _open_rgb(path):
     except Exception as exc:
         raise ValueError(f"Not a readable image ({type(exc).__name__})") from exc
     return img
-
-
+ 
+ 
 def _visual_vector(path):
     img = _open_rgb(path)
-
+ 
     # 1) colour layout: 8x8 grid of average colours, brightness-insensitive
     layout = np.asarray(img.resize((8, 8), Image.BOX), dtype=np.float64) / 255.0
     layout = layout - layout.mean(axis=(0, 1), keepdims=True)
-
+ 
     small = img.resize((64, 64), Image.BILINEAR)
-
+ 
     # 2) joint hue / saturation / value histogram (Hellinger-normalised)
     hsv = np.asarray(small.convert("HSV"), dtype=np.int64)
     h_bin = np.minimum(hsv[..., 0] * 12 // 256, 11)
@@ -64,7 +50,7 @@ def _visual_vector(path):
     index = (h_bin * 3 + s_bin) * 3 + v_bin
     hist = np.bincount(index.ravel(), minlength=12 * 3 * 3).astype(np.float64)
     hist = np.sqrt(hist / hist.sum())
-
+ 
     # 3) edge structure: gradient-orientation histogram over a 4x4 grid
     gray = np.asarray(small.convert("L"), dtype=np.float64)
     gx = np.zeros_like(gray)
@@ -80,7 +66,7 @@ def _visual_vector(path):
             sl = (slice(row * 16, row * 16 + 16), slice(col * 16, col * 16 + 16))
             cells.append(np.bincount(orient_bin[sl].ravel(), weights=magnitude[sl].ravel(), minlength=8))
     hog = np.sqrt(np.concatenate(cells) / (np.sum(cells) + 1e-9))
-
+ 
     vector = np.concatenate([
         0.35 * _normalize(layout),
         0.30 * _normalize(hist),
@@ -88,11 +74,11 @@ def _visual_vector(path):
     ])
     vector = _normalize(vector, center=False)
     return {"model": "visual-v1", "vec": [round(float(x), 5) for x in vector]}
-
-
+ 
+ 
 _clip = None
-
-
+ 
+ 
 def _clip_vector(path):
     global _clip
     _open_rgb(path)  # validates the file first
@@ -105,17 +91,17 @@ def _clip_vector(path):
     vector = np.asarray(next(iter(_clip.embed([str(path)]))), dtype=np.float64)
     vector = _normalize(vector, center=False)
     return {"model": "clip-vit-b32", "vec": [round(float(x), 5) for x in vector]}
-
-
+ 
+ 
 def image_vector(path):
     """Embedding record {'model': ..., 'vec': [...]} for one image file."""
     return _clip_vector(path) if IMAGE_BACKEND == "clip" else _visual_vector(path)
-
-
+ 
+ 
 def current_image_model():
     return "clip-vit-b32" if IMAGE_BACKEND == "clip" else "visual-v1"
-
-
+ 
+ 
 def cosine_similarity(a, b):
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -123,10 +109,10 @@ def cosine_similarity(a, b):
     y = np.asarray(b, dtype=np.float64)
     denom = np.linalg.norm(x) * np.linalg.norm(y)
     return float(x @ y / denom) if denom > 1e-12 else 0.0
-
-
+ 
+ 
 # ------------------------------------------------- optional Gemini text features
-
+ 
 TEXT_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 VISION_MODELS = [
     m.strip()
@@ -135,14 +121,16 @@ VISION_MODELS = [
 ]
 TEXT_DIMS = 768
 TEXT_MIN_SCORE = float(os.getenv("AI_MIN_SCORE", "0.55"))
-TIMEOUT_MS = int(os.getenv("AI_TIMEOUT_MS", "20000"))
+TIMEOUT_MS = int(os.getenv("AI_TIMEOUT_MS", "8000"))
+# Upload never waits longer than this for the optional Gemini description.
+DESCRIBE_BUDGET_S = float(os.getenv("AI_DESCRIBE_BUDGET_S", "4"))
 _client = None
-
-
+ 
+ 
 def gemini_enabled():
     return bool(os.getenv("GEMINI_API_KEY"))
-
-
+ 
+ 
 def _get_client():
     global _client
     if _client is None:
@@ -150,8 +138,8 @@ def _get_client():
         from google.genai import types
         _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), http_options=types.HttpOptions(timeout=TIMEOUT_MS))
     return _client
-
-
+ 
+ 
 def text_embedding(text):
     text = (text or "").strip()
     if not text or not gemini_enabled():
@@ -162,8 +150,8 @@ def text_embedding(text):
         config=types.EmbedContentConfig(output_dimensionality=TEXT_DIMS),
     )
     return [round(float(x), 5) for x in result.embeddings[0].values]
-
-
+ 
+ 
 def describe_image(path):
     from google.genai import types
     path = Path(path)
@@ -171,7 +159,11 @@ def describe_image(path):
     part = types.Part.from_bytes(data=path.read_bytes(), mime_type=mime)
     prompt = "Describe this image in 2-3 plain sentences: main objects, colors, setting and actions."
     errors = []
+    started = time.monotonic()
     for model in VISION_MODELS:
+        if time.monotonic() - started > DESCRIBE_BUDGET_S:
+            errors.append("time budget exhausted")
+            break
         try:
             response = _get_client().models.generate_content(model=model, contents=[part, prompt])
             text = (response.text or "").strip()
@@ -181,11 +173,11 @@ def describe_image(path):
         except Exception as exc:
             errors.append(f"{model}: {exc!r}"[:300])
     raise RuntimeError("All vision models failed: " + " | ".join(errors))
-
-
+ 
+ 
 # ------------------------------------------------------------- stored records
-
-
+ 
+ 
 def build_record(path, media_type, filename):
     """Return (description, record). Image matching never depends on Gemini."""
     record = {"v": 2}
@@ -194,8 +186,9 @@ def build_record(path, media_type, filename):
         record["img"] = image_vector(path)  # raises ValueError for unreadable images
         if gemini_enabled():
             try:
+                started = time.monotonic()
                 description = describe_image(path)
-                vec = text_embedding(description)
+                vec = text_embedding(description) if time.monotonic() - started < DESCRIBE_BUDGET_S else None
                 if vec:
                     record["txt"] = {"model": TEXT_MODEL, "vec": vec}
             except Exception as exc:
@@ -208,8 +201,8 @@ def build_record(path, media_type, filename):
         except Exception as exc:
             print(f"Optional text embedding skipped: {exc!r}", flush=True)
     return description, record
-
-
+ 
+ 
 def load_record(raw):
     """Parse a stored embedding column into {'img': ..., 'txt': ...} (never raises)."""
     if not raw:
@@ -223,11 +216,11 @@ def load_record(raw):
     if isinstance(data, list):  # legacy format from earlier versions: a bare text vector
         return {"txt": {"model": "legacy", "vec": data}}
     return {}
-
-
+ 
+ 
 # ----------------------------------------------------------- natural-language search
-
-
+ 
+ 
 def search_media(query, rows):
     words = [w for w in query.casefold().split() if len(w) > 2]
     query_vector = None
@@ -236,7 +229,7 @@ def search_media(query, rows):
             query_vector = text_embedding(query)
         except Exception as exc:
             print(f"Query embedding failed, using keyword search: {exc!r}", flush=True)
-
+ 
     scored = []
     for row in rows:
         text = f"{row['filename']} {row['description']}".casefold()
@@ -251,3 +244,4 @@ def search_media(query, rows):
             scored.append((semantic + (0.3 if keyword else 0.0), item))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _, item in scored[:20]]
+ 
