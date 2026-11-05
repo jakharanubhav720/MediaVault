@@ -9,7 +9,7 @@ from PIL import Image, ImageOps
  
 Image.MAX_IMAGE_PIXELS = 100_000_000  # refuse decompression bombs
  
-IMAGE_BACKEND = os.getenv("IMAGE_EMBED_BACKEND", "visual").strip().lower()
+IMAGE_BACKEND = os.getenv("IMAGE_EMBED_BACKEND", "clip").strip().lower()
  
 # ---------------------------------------------------------------- image vectors
  
@@ -77,18 +77,37 @@ def _visual_vector(path):
  
  
 _clip = None
- 
- 
+_clip_text = None
+
+
 def _clip_vector(path):
+    """Encode an image with CLIP's vision encoder."""
     global _clip
     _open_rgb(path)  # validates the file first
     if _clip is None:
         try:
             from fastembed import ImageEmbedding
         except ImportError as exc:
-            raise RuntimeError("IMAGE_EMBED_BACKEND=clip needs `fastembed` in requirements.txt") from exc
+            raise RuntimeError("CLIP search needs fastembed installed in requirements.txt") from exc
         _clip = ImageEmbedding("Qdrant/clip-ViT-B-32-vision")
     vector = np.asarray(next(iter(_clip.embed([str(path)]))), dtype=np.float64)
+    vector = _normalize(vector, center=False)
+    return {"model": "clip-vit-b32", "vec": [round(float(x), 5) for x in vector]}
+
+
+def clip_text_vector(text):
+    """Encode text in the same vector space as CLIP image embeddings."""
+    global _clip_text
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Enter a search description.")
+    if _clip_text is None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise RuntimeError("CLIP search needs fastembed installed in requirements.txt") from exc
+        _clip_text = TextEmbedding("Qdrant/clip-ViT-B-32-text")
+    vector = np.asarray(next(iter(_clip_text.embed([text[:500]]))), dtype=np.float64)
     vector = _normalize(vector, center=False)
     return {"model": "clip-vit-b32", "vec": [round(float(x), 5) for x in vector]}
  
@@ -100,6 +119,12 @@ def image_vector(path):
  
 def current_image_model():
     return "clip-vit-b32" if IMAGE_BACKEND == "clip" else "visual-v1"
+
+
+def current_text_model():
+    if IMAGE_BACKEND == "clip":
+        return "clip-vit-b32"
+    return TEXT_MODEL if gemini_enabled() else "keywords"
  
  
 def cosine_similarity(a, b):
@@ -222,26 +247,48 @@ def load_record(raw):
  
  
 def search_media(query, rows):
+    """Rank photos against text with CLIP; retain keyword fallback for other media."""
+    query = (query or "").strip()
+    if not query:
+        return []
+
     words = [w for w in query.casefold().split() if len(w) > 2]
-    query_vector = None
-    if gemini_enabled():
-        try:
-            query_vector = text_embedding(query)
-        except Exception as exc:
-            print(f"Query embedding failed, using keyword search: {exc!r}", flush=True)
- 
     scored = []
-    for row in rows:
-        text = f"{row['filename']} {row['description']}".casefold()
-        keyword = bool(words) and any(w in text for w in words)
-        semantic = 0.0
-        entry = load_record(row["embedding"]).get("txt")
-        if query_vector and entry and entry.get("model") in (TEXT_MODEL, "legacy"):
-            semantic = cosine_similarity(query_vector, entry.get("vec"))
-        if semantic >= TEXT_MIN_SCORE or keyword:
-            item = dict(row)
-            item["similarity"] = round(semantic, 4)
-            scored.append((semantic + (0.3 if keyword else 0.0), item))
+
+    if IMAGE_BACKEND == "clip":
+        query_record = clip_text_vector(query)
+        for row in rows:
+            text = f"{row['filename']} {row['description']}".casefold()
+            keyword = bool(words) and any(w in text for w in words)
+            entry = load_record(row["embedding"]).get("img")
+            semantic = 0.0
+            if row["media_type"] == "Image" and entry and entry.get("model") == query_record["model"] and entry.get("vec"):
+                semantic = cosine_similarity(query_record["vec"], entry["vec"])
+            # CLIP cosine scores are ranking signals, not calibrated probabilities.
+            if (row["media_type"] == "Image" and semantic > 0.10) or keyword:
+                item = dict(row)
+                item["similarity"] = round(semantic, 4)
+                item["match_percent"] = round(max(0.0, semantic) * 100, 1)
+                scored.append((semantic + (0.12 if keyword else 0.0), item))
+    else:
+        query_vector = None
+        if gemini_enabled():
+            try:
+                query_vector = text_embedding(query)
+            except Exception as exc:
+                print(f"Query embedding failed, using keyword search: {exc!r}", flush=True)
+
+        for row in rows:
+            text = f"{row['filename']} {row['description']}".casefold()
+            keyword = bool(words) and any(w in text for w in words)
+            semantic = 0.0
+            entry = load_record(row["embedding"]).get("txt")
+            if query_vector and entry and entry.get("model") in (TEXT_MODEL, "legacy"):
+                semantic = cosine_similarity(query_vector, entry.get("vec"))
+            if semantic >= TEXT_MIN_SCORE or keyword:
+                item = dict(row)
+                item["similarity"] = round(semantic, 4)
+                scored.append((semantic + (0.3 if keyword else 0.0), item))
+
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _, item in scored[:20]]
- 
