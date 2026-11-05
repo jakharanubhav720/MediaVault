@@ -5,4 +5,3 @@ python-multipart
 pillow
 numpy
 google-genai
-fastembed>=0.7,<1.0
