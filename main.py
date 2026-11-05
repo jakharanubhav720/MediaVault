@@ -141,7 +141,17 @@ def list_media(
     q: Optional[str] = Query(default=None, max_length=200),
     media_type: str = Query(default="All", pattern="^(All|Image|Video)$"),
 ):
+    # Remove stale database entries whose uploaded files no longer exist.
+    # This prevents broken image/video cards from returning after a refresh.
     with get_connection() as conn:
+        stale_rows = conn.execute("SELECT id, stored_filename FROM media").fetchall()
+        stale_ids = [
+            row["id"] for row in stale_rows
+            if not (UPLOAD_DIR / row["stored_filename"]).is_file()
+        ]
+        if stale_ids:
+            conn.executemany("DELETE FROM media WHERE id = ?", [(media_id,) for media_id in stale_ids])
+
         if media_type == "All":
             rows = conn.execute("SELECT * FROM media ORDER BY created_at DESC, id DESC").fetchall()
         else:
