@@ -9,7 +9,11 @@ from PIL import Image, ImageOps
  
 Image.MAX_IMAGE_PIXELS = 100_000_000  # refuse decompression bombs
  
-IMAGE_BACKEND = os.getenv("IMAGE_EMBED_BACKEND", "clip").strip().lower()
+# CLIP is deliberately opt-in because the Render Free instance has only 512 MB RAM.
+# Set ENABLE_CLIP=true only on a host with sufficient memory.
+_CLIP_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "visual").strip().lower() == "clip"
+_CLIP_ALLOWED = os.getenv("ENABLE_CLIP", "false").strip().lower() in ("1", "true", "yes", "on")
+IMAGE_BACKEND = "clip" if _CLIP_REQUESTED and _CLIP_ALLOWED else "visual"
  
 # ---------------------------------------------------------------- image vectors
  
@@ -24,13 +28,15 @@ def _normalize(block, center=True):
  
 def _open_rgb(path):
     try:
-        img = Image.open(path)
-        img.draft("RGB", (512, 512))  # fast, low-memory decode for JPEGs
-        img = ImageOps.exif_transpose(img)
-        img = img.convert("RGB")
+        with Image.open(path) as source:
+            # Ask JPEG decoders to avoid loading the full-resolution image.
+            source.draft("RGB", (512, 512))
+            img = ImageOps.exif_transpose(source)
+            # Bound downstream pixel buffers for PNGs and other formats too.
+            img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            return img.convert("RGB")
     except Exception as exc:
         raise ValueError(f"Not a readable image ({type(exc).__name__})") from exc
-    return img
  
  
 def _visual_vector(path):
