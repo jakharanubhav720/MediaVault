@@ -104,7 +104,8 @@ def health():
     return {
         "status": "ok",
         "image_model": helper.current_image_model(),
-        "text_search": "gemini" if helper.gemini_enabled() else "keywords",
+        "text_search": helper.current_text_model(),
+        "embedding_backend": "local_clip" if helper.current_image_model() == "clip-vit-b32" else "visual",
     }
 
 
