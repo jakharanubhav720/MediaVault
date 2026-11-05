@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
  
-Image.MAX_IMAGE_PIXELS = 100_000_000  # refuse decompression bombs
+Image.MAX_IMAGE_PIXELS = 25_000_000  # cap decoded image memory on small instances
  
 # CLIP is deliberately opt-in because the Render Free instance has only 512 MB RAM.
 # Set ENABLE_CLIP=true only on a host with sufficient memory.
@@ -31,9 +31,9 @@ def _open_rgb(path):
         with Image.open(path) as source:
             # Ask JPEG decoders to avoid loading the full-resolution image.
             source.draft("RGB", (512, 512))
+            # Resize before color conversion so large uploads do not create full-size RGB copies.
+            source.thumbnail((512, 512), Image.Resampling.LANCZOS)
             img = ImageOps.exif_transpose(source)
-            # Bound downstream pixel buffers for PNGs and other formats too.
-            img.thumbnail((512, 512), Image.Resampling.LANCZOS)
             return img.convert("RGB")
     except Exception as exc:
         raise ValueError(f"Not a readable image ({type(exc).__name__})") from exc
