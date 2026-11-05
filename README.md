@@ -5,7 +5,7 @@
 - FastAPI backend for upload, list, filter, search, and delete.
 - SQLite stores media metadata; files are saved in `uploads/`.
 - Optional AI-generated image captions and embeddings.
-- Semantic text search and reference-image search.
+- Local CLIP semantic search: natural-language-to-image and reference-image-to-image search.
 - Reindex existing media after configuring the AI key.
 
 ## Setup (macOS)
@@ -38,13 +38,20 @@ streamlit run app.py
 Open `http://localhost:8501`. API documentation is at `http://127.0.0.1:8000/docs`.
 
 ## AI features
-- Uploading an image generates a caption and text embedding when the API key is configured.
-- Text search embeds a natural-language query and ranks stored media by cosine similarity.
-- Reference-image search captions the reference image and compares its meaning with stored media embeddings. It does not currently use a dedicated CLIP image encoder.
-- Video files are currently indexed using filenames; video-frame extraction is a future enhancement.
-- Existing media can be indexed using `POST /media/reindex` after setting the key.
+- CLIP runs locally in the FastAPI backend through FastEmbed; no external AI API key is needed for CLIP search.
+- New photos receive a 512-dimensional CLIP vision embedding when uploaded.
+- Natural-language search embeds the query with CLIP's text encoder and compares it with saved photo embeddings.
+- Reference-image search embeds the uploaded reference with CLIP's vision encoder and compares it with saved photo embeddings.
+- CLIP's text and image encoders share the same vector space, enabling text-to-image and image-to-image retrieval.
+- Existing photos must be re-indexed after switching to CLIP: call `POST /media/reindex` once after deployment, or use the Re-index saved images button in the AI Search page.
+- Video files are not currently analyzed frame-by-frame; they can still be found by filename/description. Video-frame extraction is a future enhancement.
+- Optional Gemini image captions remain available only when `GEMINI_API_KEY` is configured. CLIP search itself does not call Gemini or another hosted AI API.
+- Similarity values are ranking scores, not calibrated probabilities that two images are identical.
 
-AI provider calls may cost money. Check current API pricing and usage limits.
+### Render deployment
+- Add `IMAGE_EMBED_BACKEND=clip` in the Render backend environment (the code defaults to CLIP if the variable is absent).
+- Deploy the backend, wait for the first model download, then call `POST /media/reindex` once to rebuild old photo embeddings.
+- The first CLIP use downloads the model files to the server; ensure the Render service has enough memory and persistent disk if you need model cache and uploaded media to survive restarts.
 
 ## API routes
 - `GET /health`
