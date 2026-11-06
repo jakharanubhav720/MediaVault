@@ -9,10 +9,10 @@ from PIL import Image, ImageOps
  
 Image.MAX_IMAGE_PIXELS = 25_000_000  # cap decoded image memory on small instances
  
-# CLIP is deliberately opt-in because the Render Free instance has only 512 MB RAM.
-# Set ENABLE_CLIP=true only on a host with sufficient memory.
-_CLIP_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "visual").strip().lower() == "clip"
-_CLIP_ALLOWED = os.getenv("ENABLE_CLIP", "false").strip().lower() in ("1", "true", "yes", "on")
+# This branch is intended for local development on a machine with sufficient RAM.
+# Keep the Render Free deployment on main, where CLIP remains disabled.
+_CLIP_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "clip").strip().lower() == "clip"
+_CLIP_ALLOWED = os.getenv("ENABLE_CLIP", "true").strip().lower() in ("1", "true", "yes", "on")
 IMAGE_BACKEND = "clip" if _CLIP_REQUESTED and _CLIP_ALLOWED else "visual"
  
 # ---------------------------------------------------------------- image vectors
