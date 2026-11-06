@@ -1,58 +1,82 @@
-# MediaVault — Full Streamlit + FastAPI + SQLite Project
+# MediaVault Backend — Local CLIP Edition
 
-## Features
-- Streamlit frontend retaining the MediaVault design.
-- FastAPI backend for upload, list, filter, search, and delete.
-- SQLite stores media metadata; files are saved in `uploads/`.
-- Optional AI-generated image captions and embeddings.
-- Lightweight visual similarity search and optional Gemini-assisted descriptions/search.
-- Reindex existing media after configuring the AI key.
+FastAPI + SQLite backend for MediaVault. This `local-clip` branch enables local CLIP semantic text-to-image and image-to-image search.
+
+## Requirements
+
+- Python 3.10 or newer
+- A machine with at least 4 GB RAM (8 GB recommended)
+- Several GB of free disk space for downloaded model files
+- macOS Apple Silicon or a compatible Linux/Windows Python environment
 
 ## Setup (macOS)
-Extract this folder and run the following commands from inside it:
+
+Run from the backend repository folder:
 
 ```bash
+git checkout local-clip
 python3 -m venv venv
 source venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-cp .env.example .env
 ```
 
-Edit `.env` and set `OPENAI_API_KEY` if you want AI features. Keep `.env` private.
+Create a `.env` file in this folder:
 
-## Run both services
-Open Terminal 1 (backend):
+```env
+IMAGE_EMBED_BACKEND=clip
+ENABLE_CLIP=true
+GEMINI_API_KEY=
+```
+
+CLIP does not require a Gemini API key. Gemini is optional for image captions and supplementary text embeddings. Keep `.env` private.
+
+## Start the backend
+
 ```bash
-cd mediavault_backend
 source venv/bin/activate
-uvicorn main:app --reload --port 8000
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open Terminal 2 (Streamlit frontend):
+- API: http://127.0.0.1:8000
+- API documentation: http://127.0.0.1:8000/docs
+- Health check: http://127.0.0.1:8000/health
+
+The first image upload or CLIP search downloads the CLIP models. Allow the initial download to finish. New image uploads are embedded with CLIP automatically.
+
+## Existing media
+
+After switching from the lightweight visual descriptor to CLIP, re-index existing images once:
+
 ```bash
-cd mediavault_backend
-source venv/bin/activate
-streamlit run app.py
+curl -X POST http://127.0.0.1:8000/media/reindex
 ```
 
-Open `http://localhost:8501`. API documentation is at `http://127.0.0.1:8000/docs`.
+Or use the Re-index saved images button in the frontend.
 
-## AI features
-- Render Free uses the lightweight `visual-v1` image descriptor for reference-image similarity; it does not load CLIP or FastEmbed.
-- Natural-language search uses optional Gemini text embeddings when `GEMINI_API_KEY` is configured, with filename/description keyword matching as a fallback.
-- Optional Gemini image captions remain available only when `GEMINI_API_KEY` is configured.
-- To enable CLIP on a larger host, install `fastembed`, set both `IMAGE_EMBED_BACKEND=clip` and `ENABLE_CLIP=true`, deploy, and re-index existing photos.
-- After changing image embedding backends, call `POST /media/reindex` once to rebuild compatible embeddings.
-- Video files are not currently analyzed frame-by-frame; they can still be found by filename/description. Video-frame extraction is a future enhancement.
-- Similarity values are ranking scores, not calibrated probabilities that two images are identical.
+## Frontend connection
 
-### Render Free deployment
-- Keep `ENABLE_CLIP` unset or set it to `false`; CLIP is disabled by default to stay within Render Free's 512 MB memory limit.
-- Do not add `fastembed` to the Render Free requirements.
-- Uploads, the media library, deletion, lightweight visual similarity, optional Gemini captions, and keyword search remain available.
-- Re-index saved images after this backend deploy if you want all existing photos to use the lightweight visual descriptor.
+When running the Next.js frontend locally, set its API base URL to:
+
+```env
+NEXT_PUBLIC_MEDIAVAULT_API_URL=http://127.0.0.1:8000
+```
+
+Restart the Next.js dev server after changing this variable. The Vercel-hosted frontend cannot reach a backend bound only to localhost; run the frontend locally too, or expose the local backend securely using a tunnel.
+
+## CLIP behavior
+
+- CLIP text and image encoders share a vector space, enabling natural-language-to-image search and reference-image similarity.
+- Similarity percentages are ranking indicators, not calibrated probabilities.
+- Video files are not currently embedded frame-by-frame; they remain searchable by filename/description.
+- The CLIP model is loaded lazily when first needed, rather than at API startup.
+
+## Render Free safety
+
+Do not deploy this `local-clip` branch to the Render Free 512 MB instance. Keep Render on `main`, where CLIP is disabled and FastEmbed is not installed.
 
 ## API routes
+
 - `GET /health`
 - `POST /media` multipart field `file`
 - `GET /media?q=term&media_type=All|Image|Video`
@@ -61,6 +85,3 @@ Open `http://localhost:8501`. API documentation is at `http://127.0.0.1:8000/doc
 - `POST /media/reindex`
 - `GET /search/ai?q=describe%20an%20image`
 - `POST /search/visual` multipart field `file`
-
-## Notes
-This is a college-project starter. It is not production-hardened. Before public deployment add authentication/authorization, private media access, quotas, stronger file-content validation, rate limits, and backups.
