@@ -10,10 +10,11 @@ from PIL import Image, ImageOps
 Image.MAX_IMAGE_PIXELS = 25_000_000  # cap decoded image memory on small instances
  
 # This branch is intended for local development on a machine with sufficient RAM.
-# Keep the Render Free deployment on main, where CLIP remains disabled.
-_CLIP_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "clip").strip().lower() == "clip"
-_CLIP_ALLOWED = os.getenv("ENABLE_CLIP", "true").strip().lower() in ("1", "true", "yes", "on")
-IMAGE_BACKEND = "clip" if _CLIP_REQUESTED and _CLIP_ALLOWED else "visual"
+# Keep the Render Free deployment on main, where local vision models remain disabled.
+_SIGLIP2_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "siglip2").strip().lower() == "siglip2"
+_SIGLIP2_ALLOWED = os.getenv("ENABLE_SIGLIP2", "true").strip().lower() in ("1", "true", "yes", "on")
+IMAGE_BACKEND = "siglip2" if _SIGLIP2_REQUESTED and _SIGLIP2_ALLOWED else "visual"
+SIGLIP2_MODEL_ID = os.getenv("SIGLIP2_MODEL_ID", "google/siglip2-base-patch16-256")
  
 # ---------------------------------------------------------------- image vectors
  
@@ -82,57 +83,100 @@ def _visual_vector(path):
     return {"model": "visual-v1", "vec": [round(float(x), 5) for x in vector]}
  
  
-_clip = None
-_clip_text = None
+_siglip2_model = None
+_siglip2_processor = None
+_siglip2_device = None
 
 
-def _clip_vector(path):
-    """Encode an image with CLIP's vision encoder."""
-    global _clip
-    _open_rgb(path)  # validates the file first
-    if _clip is None:
-        try:
-            from fastembed import ImageEmbedding
-        except ImportError as exc:
-            raise RuntimeError("CLIP search needs fastembed installed in requirements.txt") from exc
-        _clip = ImageEmbedding("Qdrant/clip-ViT-B-32-vision")
-    vector = np.asarray(next(iter(_clip.embed([str(path)]))), dtype=np.float64)
+def _load_siglip2():
+    """Load SigLIP 2 once, preferring Apple Silicon MPS when available."""
+    global _siglip2_model, _siglip2_processor, _siglip2_device
+    if _siglip2_model is not None:
+        return _siglip2_model, _siglip2_processor, _siglip2_device
+
+    try:
+        import torch
+        from transformers import AutoModel, AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError(
+            "SigLIP 2 requires torch and transformers. Install requirements.txt."
+        ) from exc
+
+    _siglip2_device = torch.device(
+        "mps" if torch.backends.mps.is_available() else "cpu"
+    )
+    print(
+        f"Loading SigLIP 2 model {SIGLIP2_MODEL_ID} on {_siglip2_device}...",
+        flush=True,
+    )
+    _siglip2_processor = AutoProcessor.from_pretrained(SIGLIP2_MODEL_ID)
+    _siglip2_model = AutoModel.from_pretrained(SIGLIP2_MODEL_ID).to(_siglip2_device)
+    _siglip2_model.eval()
+    print("SigLIP 2 model loaded successfully.", flush=True)
+    return _siglip2_model, _siglip2_processor, _siglip2_device
+
+
+def _siglip2_image_vector(path):
+    """Encode one image into SigLIP 2's shared image/text embedding space."""
+    import torch
+
+    model, processor, device = _load_siglip2()
+    image = _open_rgb(path)
+    inputs = processor(images=image, return_tensors="pt")
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+
+    with torch.inference_mode():
+        outputs = model(**inputs)
+        vector = outputs.image_embeds[0].detach().float().cpu().numpy()
+
     vector = _normalize(vector, center=False)
-    return {"model": "clip-vit-b32", "vec": [round(float(x), 5) for x in vector]}
+    return {
+        "model": "siglip2-base-patch16-256",
+        "vec": [round(float(x), 6) for x in vector],
+    }
 
 
-def clip_text_vector(text):
-    """Encode text in the same vector space as CLIP image embeddings."""
-    global _clip_text
+def siglip2_text_vector(text):
+    """Encode text in the same vector space as SigLIP 2 image embeddings."""
+    import torch
+
     text = (text or "").strip()
     if not text:
         raise ValueError("Enter a search description.")
-    if _clip_text is None:
-        try:
-            from fastembed import TextEmbedding
-        except ImportError as exc:
-            raise RuntimeError("CLIP search needs fastembed installed in requirements.txt") from exc
-        _clip_text = TextEmbedding("Qdrant/clip-ViT-B-32-text")
-    vector = np.asarray(next(iter(_clip_text.embed([text[:500]]))), dtype=np.float64)
+
+    model, processor, device = _load_siglip2()
+    # AutoProcessor applies SigLIP 2's expected text normalization and padding.
+    inputs = processor(text=[text[:500]], return_tensors="pt")
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+
+    with torch.inference_mode():
+        outputs = model(**inputs)
+        vector = outputs.text_embeds[0].detach().float().cpu().numpy()
+
     vector = _normalize(vector, center=False)
-    return {"model": "clip-vit-b32", "vec": [round(float(x), 5) for x in vector]}
- 
- 
+    return {
+        "model": "siglip2-base-patch16-256",
+        "vec": [round(float(x), 6) for x in vector],
+    }
+
+
 def image_vector(path):
     """Embedding record {'model': ..., 'vec': [...]} for one image file."""
-    return _clip_vector(path) if IMAGE_BACKEND == "clip" else _visual_vector(path)
- 
- 
+    if IMAGE_BACKEND == "siglip2":
+        return _siglip2_image_vector(path)
+    return _visual_vector(path)
+
+
 def current_image_model():
-    return "clip-vit-b32" if IMAGE_BACKEND == "clip" else "visual-v1"
+    return "siglip2-base-patch16-256" if IMAGE_BACKEND == "siglip2" else "visual-v1"
 
 
 def current_text_model():
-    if IMAGE_BACKEND == "clip":
-        return "clip-vit-b32"
+    if IMAGE_BACKEND == "siglip2":
+        return "siglip2-base-patch16-256"
     return TEXT_MODEL if gemini_enabled() else "keywords"
- 
- 
+
+
 def cosine_similarity(a, b):
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -253,7 +297,7 @@ def load_record(raw):
  
  
 def search_media(query, rows):
-    """Rank photos against text with CLIP; retain keyword fallback for other media."""
+    """Rank photos against SigLIP 2 text embeddings; retain keyword fallback for other media."""
     query = (query or "").strip()
     if not query:
         return []
@@ -261,8 +305,8 @@ def search_media(query, rows):
     words = [w for w in query.casefold().split() if len(w) > 2]
     scored = []
 
-    if IMAGE_BACKEND == "clip":
-        query_record = clip_text_vector(query)
+    if IMAGE_BACKEND == "siglip2":
+        query_record = siglip2_text_vector(query)
         for row in rows:
             text = f"{row['filename']} {row['description']}".casefold()
             keyword = bool(words) and any(w in text for w in words)
@@ -270,8 +314,9 @@ def search_media(query, rows):
             semantic = 0.0
             if row["media_type"] == "Image" and entry and entry.get("model") == query_record["model"] and entry.get("vec"):
                 semantic = cosine_similarity(query_record["vec"], entry["vec"])
-            # CLIP cosine scores are ranking signals, not calibrated probabilities.
-            if (row["media_type"] == "Image" and semantic > 0.10) or keyword:
+            # Cosine similarity is a ranking signal, not a calibrated probability.
+            min_score = float(os.getenv("SIGLIP2_TEXT_MIN_SCORE", "0.18"))
+            if (row["media_type"] == "Image" and semantic >= min_score) or keyword:
                 item = dict(row)
                 item["similarity"] = round(semantic, 4)
                 item["match_percent"] = round(max(0.0, semantic) * 100, 1)
