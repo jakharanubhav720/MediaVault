@@ -1,13 +1,13 @@
-# MediaVault Backend — Local CLIP Edition
+# MediaVault Backend — Local SigLIP 2 Edition
 
-FastAPI + SQLite backend for MediaVault. This `local-clip` branch enables local CLIP semantic text-to-image and image-to-image search.
+FastAPI + SQLite backend for MediaVault. This `local-clip` branch now uses Google's SigLIP 2 Base for local semantic text-to-image and image-to-image search. The branch name is retained so existing local clones do not need to be recloned.
 
 ## Requirements
 
 - Python 3.10 or newer
-- A machine with at least 4 GB RAM (8 GB recommended)
-- Several GB of free disk space for downloaded model files
-- macOS Apple Silicon or a compatible Linux/Windows Python environment
+- Apple Silicon Mac or a compatible PyTorch machine
+- 16 GB RAM recommended for this local setup
+- Several GB of free disk space for model weights and tokenizer files
 
 ## Setup (macOS)
 
@@ -21,15 +21,19 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in this folder:
+Create or update `.env` in this folder:
 
 ```env
-IMAGE_EMBED_BACKEND=clip
-ENABLE_CLIP=true
+IMAGE_EMBED_BACKEND=siglip2
+ENABLE_SIGLIP2=true
+SIGLIP2_MODEL_ID=google/siglip2-base-patch16-256
+SIGLIP2_TEXT_MIN_SCORE=0.18
 GEMINI_API_KEY=
+MEDIAVAULT_UPLOAD_DIR=uploads
+MAX_FILE_MB=50
 ```
 
-CLIP does not require a Gemini API key. Gemini is optional for image captions and supplementary text embeddings. Keep `.env` private.
+The old local setting `IMAGE_EMBED_BACKEND=clip` is temporarily accepted as a migration alias and selects SigLIP 2. No Gemini API key is required for SigLIP 2 embeddings. Gemini remains optional for image captions.
 
 ## Start the backend
 
@@ -42,38 +46,39 @@ python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 - API documentation: http://127.0.0.1:8000/docs
 - Health check: http://127.0.0.1:8000/health
 
-The first image upload or CLIP search downloads the CLIP models. Allow the initial download to finish. New image uploads are embedded with CLIP automatically.
+The first image upload or search downloads the SigLIP 2 model and processor from Hugging Face. This can take several minutes. The model is loaded lazily and reused. On Apple Silicon, the backend uses PyTorch MPS when available and otherwise falls back to CPU.
 
 ## Existing media
 
-After switching from the lightweight visual descriptor to CLIP, re-index existing images once:
+All existing image embeddings must be regenerated after changing from CLIP or visual-v1 to SigLIP 2. Start the backend, then run:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/media/reindex
 ```
 
-Or use the Re-index saved images button in the frontend.
+Confirm the response reports `"model":"siglip2-base-patch16-256"` and no failed IDs.
 
 ## Frontend connection
 
-When running the Next.js frontend locally, set its API base URL to:
+When running the Next.js frontend locally, set:
 
 ```env
 NEXT_PUBLIC_MEDIAVAULT_API_URL=http://127.0.0.1:8000
 ```
 
-Restart the Next.js dev server after changing this variable. The Vercel-hosted frontend cannot reach a backend bound only to localhost; run the frontend locally too, or expose the local backend securely using a tunnel.
+Restart the Next.js dev server after changing this variable.
 
-## CLIP behavior
+## Search behavior
 
-- CLIP text and image encoders share a vector space, enabling natural-language-to-image search and reference-image similarity.
-- Similarity percentages are ranking indicators, not calibrated probabilities.
-- Video files are not currently embedded frame-by-frame; they remain searchable by filename/description.
-- The CLIP model is loaded lazily when first needed, rather than at API startup.
+- SigLIP 2 image and text encoders produce vectors in a shared embedding space.
+- Text search and uploaded-reference visual search both use the same SigLIP 2 image vectors.
+- `SIGLIP2_TEXT_MIN_SCORE` controls the minimum cosine similarity used for semantic text results. Tune it against a labelled test set; it is not an accuracy percentage.
+- Similarity values are ranking signals, not calibrated probabilities.
+- Video files are not embedded frame-by-frame; they remain searchable by filename/description.
 
 ## Render Free safety
 
-Do not deploy this `local-clip` branch to the Render Free 512 MB instance. Keep Render on `main`, where CLIP is disabled and FastEmbed is not installed.
+Do not deploy this local-model branch to Render Free's 512 MB instance. Keep the Render deployment on `main`.
 
 ## API routes
 
