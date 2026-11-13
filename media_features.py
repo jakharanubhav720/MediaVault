@@ -1,6 +1,7 @@
 """MediaVault organization features: local AI tags, duplicate fingerprints and smart albums."""
 import hashlib
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
