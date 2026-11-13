@@ -90,3 +90,14 @@ Do not deploy this local-model branch to Render Free's 512 MB instance. Keep the
 - `POST /media/reindex`
 - `GET /search/ai?q=describe%20an%20image`
 - `POST /search/visual` multipart field `file`
+
+
+## Smart organization features
+
+This branch also includes three local organization features:
+
+- **Automatic AI tags:** image uploads are compared with a small category vocabulary using the existing SigLIP 2 image/text embedding space. Tags are stored as JSON in SQLite. Existing images can be tagged again with `POST /media/reindex`.
+- **Duplicate finder:** `POST /duplicates/scan` refreshes SHA-256 and perceptual difference-hash fingerprints; `GET /duplicates` returns exact and visually similar groups. Similarity groups are suggestions only—files are never deleted automatically.
+- **Smart albums:** `GET /albums` groups tagged images into Food, Travel, Nature, People, Pets & Animals, Vehicles, Documents, Architecture, Events and Technology. `GET /albums/{slug}` returns one album.
+
+SQLite startup migrations add the `tags`, `sha256` and `phash` columns without deleting existing media. The Next.js `/organize` page provides the Smart Albums and Duplicate Finder interface. Re-index existing images after pulling this branch to populate tags and fingerprints.
