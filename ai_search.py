@@ -329,7 +329,7 @@ def search_media(query, rows):
             if row["media_type"] == "Image" and entry and entry.get("model") == query_record["model"] and entry.get("vec"):
                 semantic = cosine_similarity(query_record["vec"], entry["vec"])
             # Cosine similarity is a ranking signal, not a calibrated probability.
-            min_score = float(os.getenv("SIGLIP2_TEXT_MIN_SCORE", "0.18"))
+            min_score = float(os.getenv("SIGLIP2_TEXT_MIN_SCORE", "0.08"))
             if (row["media_type"] == "Image" and semantic >= min_score) or keyword:
                 item = dict(row)
                 item["similarity"] = round(semantic, 4)
