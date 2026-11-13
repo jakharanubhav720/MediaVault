@@ -41,23 +41,40 @@ def _hamming(left, right):
         return 64
 
 def tag_image(path):
-    """Generate conservative category tags using local SigLIP 2; never blocks upload on failure."""
+    """Generate conservative category tags with one batched local SigLIP 2 text pass."""
+    import numpy as np
+    import torch
     import ai_search
     if ai_search.IMAGE_BACKEND != "siglip2":
         return []
-    image = ai_search.image_vector(path)
+    image = np.asarray(ai_search.image_vector(path)["vec"], dtype=np.float32)
+    prompts = [f"a photo of {label}" for labels in ALBUM_LABELS.values() for label in labels]
+    missing = [prompt for prompt in prompts if prompt not in _TAG_CACHE]
+    if missing:
+        model, processor, device = ai_search._load_siglip2()
+        inputs = processor(text=missing, padding="max_length", max_length=64,
+                           truncation=True, return_tensors="pt")
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        with torch.inference_mode():
+            features = model.get_text_features(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask"),
+            ).detach().float().cpu().numpy()
+        for prompt, vector in zip(missing, features):
+            norm = float(np.linalg.norm(vector))
+            _TAG_CACHE[prompt] = (vector / norm).tolist() if norm > 1e-12 else vector.tolist()
     tags = []
+    offset = 0
     for album, labels in ALBUM_LABELS.items():
-        scores = []
+        candidates = []
         for label in labels:
-            prompt = f"a photo of {label}"
-            if prompt not in _TAG_CACHE:
-                _TAG_CACHE[prompt] = ai_search.siglip2_text_vector(prompt)["vec"]
-            scores.append((ai_search.cosine_similarity(image["vec"], _TAG_CACHE[prompt]), label))
-        score, label = max(scores, default=(0.0, ""))
-        # A fixed conservative floor avoids assigning a category to every image.
+            vector = _TAG_CACHE[f"a photo of {label}"]
+            score = float(np.dot(image, np.asarray(vector, dtype=np.float32)))
+            candidates.append((score, label))
+        score, label = max(candidates, default=(0.0, ""))
         if score >= 0.12:
-            tags.append({"tag": label, "album": album, "score": round(float(score), 4)})
+            tags.append({"tag": label, "album": album, "score": round(score, 4)})
+        offset += len(labels)
     return tags
 
 def duplicate_groups(rows, upload_dir, near_threshold=6):
