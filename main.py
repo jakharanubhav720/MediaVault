@@ -46,7 +46,11 @@ def startup():
 
 def public_item(row):
     item = dict(row)
-    item.pop("embedding", None)  # similarity / match_percent are intentionally kept
+    item.pop("embedding", None)
+    try:
+        item["tags"] = json.loads(item.get("tags") or "[]")
+    except (TypeError, ValueError):
+        item["tags"] = []
     item["url"] = f"/uploads/{item['stored_filename']}"
     return item
 
@@ -183,12 +187,17 @@ def reindex_media():
 
         try:
             description, record = helper.build_record(path, row["media_type"], row["filename"])
+            tags = []
+            sha256 = phash = None
+            if row["media_type"] == "Image":
+                from media_features import image_fingerprints, tag_image
+                sha256, phash = image_fingerprints(path)
+                tags = tag_image(path)
             with get_connection() as conn:
-                if description:
-                    conn.execute("UPDATE media SET embedding = ?, description = ? WHERE id = ?",
-                                 (json.dumps(record), description, row["id"]))
-                else:
-                    conn.execute("UPDATE media SET embedding = ? WHERE id = ?", (json.dumps(record), row["id"]))
+                conn.execute(
+                    "UPDATE media SET embedding = ?, description = ?, tags = ?, sha256 = ?, phash = ? WHERE id = ?",
+                    (json.dumps(record), description or row["description"], json.dumps(tags), sha256, phash, row["id"]),
+                )
             updated += 1
         except Exception as error:
             print(f"Reindex failed for media {row['id']}: {error!r}", flush=True)
