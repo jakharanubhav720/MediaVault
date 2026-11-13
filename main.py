@@ -279,8 +279,12 @@ async def visual_search(file: UploadFile = File(...)):
 
             score = helper.cosine_similarity(query["vec"], entry["vec"])
             item = dict(row)
-            item["similarity"] = round(score, 4)                         # raw cosine, 0..1
-            item["match_percent"] = round(max(0.0, score) * 100, 1)      # shown as "Match: 96.5%"
+            item["similarity"] = round(score, 4)  # Keep raw cosine for ranking.
+            # Calibrate the displayed relevance score: unrelated pairs around 0.54
+            # should not look like 54% matches. Exact matches remain 100%.
+            relevance_floor = float(os.getenv("VISUAL_MATCH_FLOOR", "0.60"))
+            calibrated = (score - relevance_floor) / max(1e-9, 1.0 - relevance_floor)
+            item["match_percent"] = round(min(1.0, max(0.0, calibrated)) * 100, 1)
             ranked.append(item)
 
         ranked.sort(key=lambda item: item["similarity"], reverse=True)
