@@ -104,7 +104,7 @@ def health():
         "status": "ok",
         "image_model": helper.current_image_model(),
         "text_search": helper.current_text_model(),
-        "embedding_backend": "local_clip" if helper.current_image_model() == "clip-vit-b32" else "visual",
+        "embedding_backend": "local_siglip2" if helper.current_image_model() == "siglip2-base-patch16-256" else "visual",
     }
 
 
