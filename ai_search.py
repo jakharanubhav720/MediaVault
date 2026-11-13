@@ -11,7 +11,10 @@ Image.MAX_IMAGE_PIXELS = 25_000_000  # cap decoded image memory on small instanc
  
 # This branch is intended for local development on a machine with sufficient RAM.
 # Keep the Render Free deployment on main, where local vision models remain disabled.
-_SIGLIP2_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "siglip2").strip().lower() == "siglip2"
+_EMBED_BACKEND_REQUESTED = os.getenv("IMAGE_EMBED_BACKEND", "siglip2").strip().lower()
+# Treat the previous "clip" setting as SigLIP 2 during migration, so existing
+# local .env files continue using a semantic model instead of silently falling back.
+_SIGLIP2_REQUESTED = _EMBED_BACKEND_REQUESTED in ("siglip2", "clip")
 _SIGLIP2_ALLOWED = os.getenv("ENABLE_SIGLIP2", "true").strip().lower() in ("1", "true", "yes", "on")
 IMAGE_BACKEND = "siglip2" if _SIGLIP2_REQUESTED and _SIGLIP2_ALLOWED else "visual"
 SIGLIP2_MODEL_ID = os.getenv("SIGLIP2_MODEL_ID", "google/siglip2-base-patch16-256")
