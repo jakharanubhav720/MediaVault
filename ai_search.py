@@ -129,8 +129,9 @@ def _siglip2_image_vector(path):
     inputs = {key: value.to(device) for key, value in inputs.items()}
 
     with torch.inference_mode():
-        outputs = model(**inputs)
-        vector = outputs.image_embeds[0].detach().float().cpu().numpy()
+        # SigLIP 2 exposes dedicated feature methods; pass pixel_values explicitly.
+        features = model.get_image_features(pixel_values=inputs["pixel_values"])
+        vector = features[0].detach().float().cpu().numpy()
 
     vector = _normalize(vector, center=False)
     return {
@@ -159,8 +160,12 @@ def siglip2_text_vector(text):
     inputs = {key: value.to(device) for key, value in inputs.items()}
 
     with torch.inference_mode():
-        outputs = model(**inputs)
-        vector = outputs.text_embeds[0].detach().float().cpu().numpy()
+        # SigLIP 2 requires token IDs (and attention mask) for text features.
+        features = model.get_text_features(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+        )
+        vector = features[0].detach().float().cpu().numpy()
 
     vector = _normalize(vector, center=False)
     return {
