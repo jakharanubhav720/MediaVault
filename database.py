@@ -29,3 +29,13 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON media(media_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_media_filename ON media(filename)")
+
+        # Additive migrations preserve existing SQLite rows and databases.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(media)").fetchall()}
+        if "tags" not in columns:
+            conn.execute("ALTER TABLE media ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        if "sha256" not in columns:
+            conn.execute("ALTER TABLE media ADD COLUMN sha256 TEXT")
+        if "phash" not in columns:
+            conn.execute("ALTER TABLE media ADD COLUMN phash TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_media_sha256 ON media(sha256)")
