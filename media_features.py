@@ -72,7 +72,7 @@ def tag_image(path):
             score = float(np.dot(image, np.asarray(vector, dtype=np.float32)))
             candidates.append((score, label))
         score, label = max(candidates, default=(0.0, ""))
-        if score >= 0.12:
+        if score >= float(os.getenv("AUTO_TAG_MIN_SCORE", "0.085")):
             tags.append({"tag": label, "album": album, "score": round(score, 4)})
         offset += len(labels)
     return tags
