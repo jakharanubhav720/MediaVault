@@ -149,7 +149,13 @@ def siglip2_text_vector(text):
 
     model, processor, device = _load_siglip2()
     # AutoProcessor applies SigLIP 2's expected text normalization and padding.
-    inputs = processor(text=[text[:500]], return_tensors="pt")
+    inputs = processor(
+        text=[text[:500]],
+        padding="max_length",
+        max_length=64,
+        truncation=True,
+        return_tensors="pt",
+    )
     inputs = {key: value.to(device) for key, value in inputs.items()}
 
     with torch.inference_mode():
