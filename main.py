@@ -59,6 +59,9 @@ def read_media_rows():
 def save_upload(file_path: Path, original_name: str, content_type: str, data: bytes, media_type: str):
     description = original_name
     embedding = None
+    tags = []
+    sha256 = None
+    phash = None
 
     try:
         ai_description, record = ai().build_record(file_path, media_type, original_name)
@@ -66,23 +69,23 @@ def save_upload(file_path: Path, original_name: str, content_type: str, data: by
             description = ai_description
         embedding = json.dumps(record)
     except Exception as exc:
-        # The file is still saved; it just will not appear in similarity results until re-indexed.
         print(f"Embedding generation failed: {exc!r}", flush=True)
+
+    if media_type == "Image":
+        try:
+            from media_features import image_fingerprints, tag_image
+            sha256, phash = image_fingerprints(file_path)
+            tags = tag_image(file_path)
+        except Exception as exc:
+            print(f"Automatic tagging/fingerprinting skipped: {exc!r}", flush=True)
 
     with get_connection() as conn:
         cursor = conn.execute(
             """INSERT INTO media
-            (filename, stored_filename, media_type, mime_type, size_bytes, description, embedding)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                original_name,
-                file_path.name,
-                media_type,
-                content_type,
-                len(data),
-                description,
-                embedding,
-            ),
+            (filename, stored_filename, media_type, mime_type, size_bytes, description, embedding, tags, sha256, phash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (original_name, file_path.name, media_type, content_type, len(data),
+             description, embedding, json.dumps(tags), sha256, phash),
         )
         row = conn.execute(
             "SELECT * FROM media WHERE id = ?",
@@ -192,6 +195,67 @@ def reindex_media():
             failures.append(row["id"])
 
     return {"updated": updated, "failed_ids": failures, "model": helper.current_image_model()}
+
+
+@app.post("/duplicates/scan")
+def scan_duplicates():
+    """Refresh image fingerprints, then return exact and visually similar groups."""
+    from media_features import duplicate_groups, image_fingerprints
+    rows = read_media_rows()
+    indexed, failed = 0, []
+    for row in rows:
+        if row["media_type"] != "Image":
+            continue
+        try:
+            sha256, phash = image_fingerprints(UPLOAD_DIR / row["stored_filename"])
+            with get_connection() as conn:
+                conn.execute("UPDATE media SET sha256 = ?, phash = ? WHERE id = ?",
+                             (sha256, phash, row["id"]))
+            indexed += 1
+        except Exception as exc:
+            failed.append(row["id"])
+            print(f"Duplicate scan failed for {row['id']}: {exc!r}", flush=True)
+    groups = duplicate_groups(read_media_rows(), UPLOAD_DIR)
+    return {"scanned": indexed, "failed_ids": failed, "group_count": len(groups), "groups": groups}
+
+
+@app.get("/duplicates")
+def get_duplicates():
+    from media_features import duplicate_groups
+    groups = duplicate_groups(read_media_rows(), UPLOAD_DIR)
+    return {"group_count": len(groups), "groups": groups}
+
+
+@app.get("/albums")
+def get_smart_albums():
+    """Build smart albums dynamically from saved AI tags."""
+    albums = {}
+    for row in read_media_rows():
+        if row["media_type"] != "Image":
+            continue
+        try:
+            tags = json.loads(row["tags"] or "[]")
+        except (TypeError, ValueError, KeyError):
+            tags = []
+        for tag in tags:
+            name = tag.get("album")
+            if not name:
+                continue
+            album = albums.setdefault(name, {"name": name, "slug": name.lower().replace(" & ", "-").replace(" ", "-"), "count": 0, "items": []})
+            album["count"] += 1
+            item = public_item(row)
+            item["tags"] = tags
+            album["items"].append(item)
+    return {"count": len(albums), "albums": sorted(albums.values(), key=lambda album: album["name"])}
+
+
+@app.get("/albums/{slug}")
+def get_smart_album(slug: str):
+    data = get_smart_albums()
+    for album in data["albums"]:
+        if album["slug"] == slug:
+            return album
+    raise HTTPException(404, "Smart album not found. Re-index images to generate AI tags.")
 
 
 @app.get("/media/{media_id}")
